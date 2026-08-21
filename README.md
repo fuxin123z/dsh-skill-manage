@@ -25,19 +25,25 @@ Pair with [`dsh-auto-memory`](https://github.com/Aik358/dsh-auto-memory) for dec
 
 ## Install
 
-**From npm** (v0.2.0+):
+**Option A — via `dsh plugin`** (recommended; handles both steps below automatically):
 
 ```bash
 dsh plugin --profile web add dsh-skill-manage
 ```
 
-or add to your profile's `package.json` dependencies:
+**Option B — manual npm install**, in your DSH profile dir (e.g. `~/.dsh/profiles/web`):
 
-```json
-"dsh-skill-manage": "^0.2.0"
+```bash
+# 1. add the dependency
+npm install dsh-skill-manage        # or: pnpm add dsh-skill-manage
+
+# 2. register the bundle in package.json → dsh.profile.bundles:
+#    "dsh": { "profile": { "bundles": [ ..., "dsh-skill-manage" ] } }
+
+# 3. restart dsh web
 ```
 
-then `pnpm install` and restart dsh web.
+The plugin needs no configuration. Log line `[dsh-skill-manage] ready` confirms it loaded.
 
 **From source (local link)** — for development:
 
