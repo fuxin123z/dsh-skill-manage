@@ -1,5 +1,8 @@
 # dsh-skill-manage
 
+[![npm version](https://img.shields.io/npm/v/dsh-skill-manage.svg)](https://www.npmjs.com/package/dsh-skill-manage)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that gives the agent **procedural memory**: a `skill_manage` tool for authoring its own skills — create, patch, disable, delete — with layered delete guards. Built on `skill-filesystem`'s hot-reload watcher, so a skill created mid-session is usable in the same session, no restart.
 
 Pair with [`dsh-auto-memory`](https://github.com/Aik358/dsh-auto-memory) for declarative memory: that one remembers *facts* (logs, notes, preferences), this one remembers *how to do things* (workflows, pitfalls, procedures).
@@ -20,7 +23,23 @@ Pair with [`dsh-auto-memory`](https://github.com/Aik358/dsh-auto-memory) for dec
 - **Atomic writes** (temp + rename) so the watcher never sees a half-written SKILL.md
 - **CRLF-safe** frontmatter parsing
 
-## Install (local link)
+## Install
+
+**From npm** (v0.2.0+):
+
+```bash
+dsh plugin --profile web add dsh-skill-manage
+```
+
+or add to your profile's `package.json` dependencies:
+
+```json
+"dsh-skill-manage": "^0.2.0"
+```
+
+then `pnpm install` and restart dsh web.
+
+**From source (local link)** — for development:
 
 ```bash
 # in your DSH profile dir (e.g. ~/.dsh/profiles/web)
