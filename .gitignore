@@ -1,0 +1,55 @@
+# --- Rust / Python / 编辑器 ---
+target/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Node / pnpm ---
+node_modules/
+.pnpm-store/
+npm-debug.log*
+pnpm-debug.log*
+.yarn/
+
+# --- 测试沙箱与临时产物 ---
+.smoke-sandbox/
+*.tmp-*
+coverage/
+.nyc_output/
+
+# --- 运行期数据(绝不能进仓库) ---
+*.log
+*.sqlite
+*.sqlite-*
+*.db
+
+# --- 密钥与凭据(防御性,任何位置任何名字) ---
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+id_rsa*
+id_ed25519*
+*.kdbx
+credentials*.json
+secrets*.yaml
+secrets*.yml
+service-account*.json
+.google/
+.aws/
+.ssh/
+
+# --- 本地备份文件 ---
+*.bak
+*.orig
+*.rej
