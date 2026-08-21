@@ -240,9 +240,11 @@ async function patchSkill(name, old_string, new_string, file_path, replace_all) 
   if (count > 1 && !replace_all) {
     return fail(`old_string appears ${count} times; pass replace_all=true or add surrounding context to make it unique.`)
   }
-  const updated = replace_all
-    ? content.split(old_string).join(new_string)
-    : content.replace(old_string, new_string)
+  // split/join for BOTH branches: String.replace treats `$` sequences in the
+  // replacement as special patterns (`$&`, `$'`, `$`` insert match/prefix/suffix
+  // text) — a new_string containing regex like `(.*)$` corrupted SKILL.md by
+  // splicing whole-file copies into the output. split/join is literal.
+  const updated = content.split(old_string).join(new_string)
   if (target === found.skillMd) {
     const fmErr = validateFrontmatter(updated)
     if (fmErr) return fail(`patch broke the SKILL.md: ${fmErr}`)

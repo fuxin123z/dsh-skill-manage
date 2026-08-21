@@ -148,6 +148,14 @@ check('empty references dir pruned', !existsSync(path.join(SKILLS, 'smoke-test-s
 r = parse(await I.removeSkillFile('smoke-test-skill', 'references/extra.md'))
 check('remove_file missing file refused', !r.success)
 
+// (f) literal replacement: `$` sequences in new_string must stay literal
+// (String.replace would splice whole-file copies — corrupted a real SKILL.md).
+r = parse(await I.patchSkill('smoke-test-skill', 'Step one (explicit path).', 'regex: `(.*)$` and `$&` + `$1` stay literal.'))
+check('patch with $-sequences literal', r.success, JSON.stringify(r))
+const dollarDisk = readFileSync(path.join(SKILLS, 'smoke-test-skill', 'SKILL.md'), 'utf8')
+check('no splice on $ (single frontmatter)', dollarDisk.split('name: smoke-test-skill').length === 2, JSON.stringify(dollarDisk.slice(0, 200)))
+check('$& literally present', dollarDisk.includes('`$&`'))
+
 await I.deleteSkill('smoke-test-skill')
 
 console.log('== 10. root delete refused (defense in depth) ==')
