@@ -1,17 +1,20 @@
 # dsh-skill-manage
 
-DSH (DeepSeek Harness) plugin that gives the agent **procedural memory**: a Hermes-style `skill_manage` tool for creating, patching, and deleting skills in `~/.dsh/skills`, with an English trigger-discipline prompt section and layered delete guards. Built on top of `skill-filesystem`'s hot-reload watcher — created skills are usable in the same session, no restart.
+A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that gives the agent **procedural memory**: a `skill_manage` tool for authoring its own skills — create, patch, disable, delete — with layered delete guards. Built on `skill-filesystem`'s hot-reload watcher, so a skill created mid-session is usable in the same session, no restart.
 
 Pair with [`dsh-auto-memory`](https://github.com/Aik358/dsh-auto-memory) for declarative memory: that one remembers *facts* (logs, notes, preferences), this one remembers *how to do things* (workflows, pitfalls, procedures).
 
 ## What it adds
 
-- **`skill_manage` tool** with actions: `create` / `patch` / `edit` / `delete` / `write_file` / `remove_file` / `list`
-- **Trigger discipline** (English, static system-prompt section, cache-stable): create a skill when a complex task succeeded (5+ tool calls), errors were overcome, a user-corrected approach proved itself, or the user asks to remember a procedure; patch immediately when a skill hits uncovered pitfalls
+**`skill_manage` tool** — actions: `create` / `patch` / `edit` / `delete` / `disable` / `enable` / `write_file` / `remove_file` / `list`
+
+- **Two scopes** — `scope: 'user'` (default, `~/.dsh/skills`, all workspaces) or `scope: 'project'` (`<projectRoot>/.dsh/skills`, this workspace only). The project root is resolved exactly like the harness's own skill lookup: walk up from the session cwd to the nearest `.git`, falling back to the cwd itself. `list` shows both scopes in one table.
+- **Disable/enable (reversible)** — toggles `disable-model-invocation` in SKILL.md frontmatter, the same key the harness's skill catalog filters on (`isModelInvocable`). Disabling hides a skill from the model's catalog without touching its content; enabling restores it. Prefer `disable` over `delete` for seasonal or off-context skills.
+- **Trigger discipline** (English, static system-prompt section, cache-stable): create a skill when a complex task succeeded (5+ tool calls), errors were overcome, a user-corrected approach proved itself, or the user asks to remember a procedure; patch immediately when a skill hits uncovered pitfalls.
 - **Delete guards**:
   - only skills carrying the `created_by: agent` frontmatter marker are deletable — marketplace/user skills are refused
   - `pinned: true` frontmatter blocks delete (patch/edit still allowed)
-  - path confinement to the skills root; symlinked skill directories refused
+  - path confinement to the resolved skills root; symlinked skill directories refused
   - name-drift guard: patch/edit cannot silently rename a skill
 - **Validation**: name regex + length, frontmatter requires `name` + `description`, description ≤1024 chars, SKILL.md ≤100k chars, supporting files ≤1 MiB, supporting paths confined to `references/ templates/ scripts/ assets/`
 - **Atomic writes** (temp + rename) so the watcher never sees a half-written SKILL.md
@@ -31,7 +34,7 @@ pnpm install
 ## Develop & test
 
 ```bash
-node test.mjs      # guard-level smoke tests (34 cases, sandboxed DSH_HOME)
+node test.mjs      # guard-level smoke tests (53 cases, sandboxed DSH_HOME)
 node loadtest.mjs  # host-shape contract + real round-trip against ~/.dsh/skills
 ```
 
@@ -40,6 +43,7 @@ node loadtest.mjs  # host-shape contract + real round-trip against ~/.dsh/skills
 - Flat layout only (`<root>/<name>/SKILL.md`); nested category dirs not listed
 - No YAML multi-line block scalars (`description: |`) — keep values single-line
 - Pin management is manual (edit frontmatter); no usage telemetry
+- Project scope assumes one root per session (the session cwd's git root)
 
 ## License
 

@@ -1,7 +1,7 @@
 /**
  * dsh-skill-manage — agent-managed procedural memory for DSH.
  *
- * Mirrors Hermes Agent's skill_manage concept: lets the agent turn proven
+ * Gives the agent a skill_manage tool: lets the agent turn proven
  * workflows into reusable skills. The storage engine already exists — the
  * skill-filesystem watcher hot-loads anything written under ~/.dsh/skills —
  * so this plugin is only three things:
@@ -39,6 +39,8 @@ const MAX_SKILL_FILE_BYTES = 1_048_576 // 1 MiB per supporting file
 const VALID_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/
 const ALLOWED_SUBDIRS = new Set(['references', 'templates', 'scripts', 'assets'])
 const AGENT_MARKER = 'created_by: agent'
+const DISABLE_KEY = 'disable-model-invocation'
+const SCOPES = ['user', 'project']
 
 /** System prompt order: tool-guidance band is 100–199 (see dsh-system-prompt types). */
 const SECTION_ORDER = 150
@@ -60,6 +62,49 @@ A good skill has: trigger conditions ("Use when …"), numbered steps with exact
 function skillsRoot() {
   const home = process.env.DSH_HOME || path.join(homedir(), '.dsh')
   return path.join(home, 'skills')
+}
+
+/**
+ * Project root per harness skill-filesystem semantics: walk up from cwd
+ * looking for `.git`; if none exists anywhere, the starting cwd IS the root
+ * (the harness's findProjectRoot falls back to cwd the same way).
+ */
+async function projectRootFrom(cwd) {
+  if (!cwd || !path.isAbsolute(cwd)) return null
+  const start = path.resolve(cwd)
+  let current = start
+  while (true) {
+    try { await lstat(path.join(current, '.git')); return current } catch { /* keep walking */ }
+    const parent = path.dirname(current)
+    if (parent === current) return start
+    current = parent
+  }
+}
+
+/**
+ * Resolve the skills root for a scope. 'user' → $DSH_HOME/skills (the
+ * watcher's user-dsh root). 'project' → <projectRoot>/.dsh/skills where
+ * projectRoot mirrors the harness's `.git`-walking findProjectRoot, seeded
+ * from the session cwd when available.
+ */
+async function skillsRootFor(scope, sessionCwd) {
+  if (scope === 'project') {
+    const root = await projectRootFrom(sessionCwd)
+    if (!root) {
+      return { error: "scope 'project' requires an absolute session cwd (walk up from it to find the project root); none available." }
+    }
+    return { root: path.join(root, '.dsh', 'skills') }
+  }
+  return { root: skillsRoot() }
+}
+
+
+function validateScope(scope) {
+  if (scope === undefined || scope === null || scope === '') return null
+  if (!SCOPES.includes(scope)) {
+    return `Invalid scope '${scope}'. Use 'user' (default, $DSH_HOME/skills) or 'project' (<projectRoot>/.dsh/skills).`
+  }
+  return null
 }
 
 function fail(message) {
@@ -117,21 +162,21 @@ function ensureAgentMarker(content) {
   return content.replace(/^---\r?\n/, (m) => m + AGENT_MARKER + (m.endsWith('\r\n') ? '\r\n' : '\n'))
 }
 
-/** Resolve a skill by name under the skills root. Returns { dir, skillMd } or null. */
-function skillPaths(name) {
-  const dir = path.join(skillsRoot(), name)
+/** Resolve a skill by name under a skills root. Returns { dir, skillMd } or null. */
+function skillPaths(name, root) {
+  const dir = path.join(root, name)
   return { dir, skillMd: path.join(dir, 'SKILL.md') }
 }
 
-async function findSkill(name) {
+async function findSkill(name, root) {
   const nameErr = validateName(name)
   if (nameErr) return { error: nameErr }
-  const { dir, skillMd } = skillPaths(name)
+  const { dir, skillMd } = skillPaths(name, root)
   try {
     await readFile(skillMd, 'utf8')
-    return { dir, skillMd }
+    return { dir, skillMd, root }
   } catch {
-    return { error: `Skill '${name}' not found under ${skillsRoot()}.` }
+    return { error: `Skill '${name}' not found under ${root}.` }
   }
 }
 
@@ -165,18 +210,18 @@ async function atomicWrite(target, content) {
  *   2. the skills root itself,
  *   3. skill directories reached via symlink (rmtree redirect).
  */
-async function validateDeleteTarget(dir) {
+async function validateDeleteTarget(dir, root) {
   let st
   try { st = await lstat(dir) } catch { return `Skill directory not found: ${dir}` }
   if (st.isSymbolicLink()) {
     return `Refusing to delete '${dir}': the skill directory is a symlink. Remove the link manually if intended.`
   }
-  const root = await realpath(skillsRoot()).catch(() => skillsRoot())
+  const resolvedRoot = await realpath(root).catch(() => root)
   const resolved = await realpath(dir).catch(() => dir)
-  if (resolved === root) {
+  if (resolved === resolvedRoot) {
     return 'Refusing to delete: target resolves to the skills root itself, which would remove every installed skill.'
   }
-  const rel = path.relative(root, resolved)
+  const rel = path.relative(resolvedRoot, resolved)
   if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
     return `Refusing to delete '${dir}': path does not resolve inside the skills root.`
   }
@@ -202,7 +247,7 @@ async function validateDeleteOwnership(name, skillMd) {
 // Action handlers
 // ---------------------------------------------------------------------------
 
-async function createSkill(name, content) {
+async function createSkill(name, content, root) {
   const nameErr = validateName(name)
   if (nameErr) return fail(nameErr)
   const fmErr = validateFrontmatter(content)
@@ -214,14 +259,14 @@ async function createSkill(name, content) {
   if (parsed.data.name !== name) {
     return fail(`frontmatter name '${parsed.data.name}' must match the requested skill name '${name}'.`)
   }
-  const { dir, skillMd } = skillPaths(name)
+  const { dir, skillMd } = skillPaths(name, root)
   try { await readFile(skillMd, 'utf8'); return fail(`Skill '${name}' already exists at ${skillMd}. Use patch or edit.`) } catch { /* not found — good */ }
   await atomicWrite(skillMd, ensureAgentMarker(content))
   return ok(`Skill '${name}' created at ${skillMd}. It is hot-loaded and already usable this session.`, { path: skillMd })
 }
 
-async function patchSkill(name, old_string, new_string, file_path, replace_all) {
-  const found = await findSkill(name)
+async function patchSkill(name, old_string, new_string, file_path, replace_all, root) {
+  const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
   let target = found.skillMd
   if (file_path && file_path !== 'SKILL.md') {
@@ -259,8 +304,8 @@ async function patchSkill(name, old_string, new_string, file_path, replace_all) 
   return ok(`Patched ${file_path || 'SKILL.md'} in skill '${name}' (${replace_all ? count + ' occurrences' : '1 occurrence'}).`)
 }
 
-async function editSkill(name, content) {
-  const found = await findSkill(name)
+async function editSkill(name, content, root) {
+  const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
   const fmErr = validateFrontmatter(content)
   if (fmErr) return fail(fmErr)
@@ -282,10 +327,10 @@ async function editSkill(name, content) {
   return ok(`Skill '${name}' SKILL.md fully rewritten.`)
 }
 
-async function deleteSkill(name) {
-  const found = await findSkill(name)
+async function deleteSkill(name, root) {
+  const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
-  const unsafe = await validateDeleteTarget(found.dir)
+  const unsafe = await validateDeleteTarget(found.dir, root)
   if (unsafe) return fail(unsafe)
   const owner = await validateDeleteOwnership(name, found.skillMd)
   if (owner) return fail(owner)
@@ -294,8 +339,8 @@ async function deleteSkill(name) {
 }
 
 /** Add or overwrite a supporting file (references/ templates/ scripts/ assets/) inside a skill. */
-async function writeSkillFile(name, file_path, file_content) {
-  const found = await findSkill(name)
+async function writeSkillFile(name, file_path, file_content, root) {
+  const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
   const r = await resolveSupportingFile(found.dir, file_path)
   if (r.error) return fail(r.error)
@@ -309,8 +354,8 @@ async function writeSkillFile(name, file_path, file_content) {
 }
 
 /** Remove a supporting file from a skill; prunes the empty parent subdir. */
-async function removeSkillFile(name, file_path) {
-  const found = await findSkill(name)
+async function removeSkillFile(name, file_path, root) {
+  const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
   const r = await resolveSupportingFile(found.dir, file_path)
   if (r.error) return fail(r.error)
@@ -327,11 +372,10 @@ async function removeSkillFile(name, file_path) {
   return ok(`File '${file_path}' removed from skill '${name}'.`)
 }
 
-async function listSkills() {
-  const root = skillsRoot()
+async function listSkills(root, scopeLabel) {
   let entries
   try { entries = await readdir(root, { withFileTypes: true }) } catch {
-    return ok(`No skills directory at ${root}.`)
+    return [] // missing root = no skills there (project roots often absent)
   }
   const rows = []
   for (const e of entries) {
@@ -341,17 +385,57 @@ async function listSkills() {
     try {
       const content = await readFile(skillMd, 'utf8')
       const parsed = parseFrontmatter(content)
+      const data = parsed.data || {}
       rows.push({
         name: e.name,
+        scope: scopeLabel,
         agent_created: content.includes(AGENT_MARKER),
-        pinned: String((parsed.data || {}).pinned).toLowerCase() === 'true',
-        description: ((parsed.data || {}).description || '').slice(0, 100),
+        pinned: String(data.pinned).toLowerCase() === 'true',
+        disabled: String(data[DISABLE_KEY]).toLowerCase() === 'true',
+        description: (data.description || '').slice(0, 100),
       })
     } catch {
-      rows.push({ name: e.name, note: 'no SKILL.md at top level (nested layout not shown in v0)' })
+      rows.push({ name: e.name, scope: scopeLabel, note: 'no SKILL.md at top level (nested layout not shown in v0)' })
     }
   }
-  return ok(`${rows.length} skill(s) under ${root}:`, { skills: rows })
+  return rows
+}
+
+/**
+ * Disable/enable a skill by writing/removing `disable-model-invocation` in
+ * SKILL.md frontmatter — the official key the skill catalog filters on
+ * (frontmatterBoolean accepts true/yes/on). Content is otherwise untouched.
+ */
+async function setSkillDisabled(name, disable, root) {
+  const found = await findSkill(name, root)
+  if (found.error) return fail(found.error)
+  let content
+  try { content = await readFile(found.skillMd, 'utf8') } catch { return fail(`Cannot read ${found.skillMd}.`) }
+  const parsed = parseFrontmatter(content)
+  if (parsed.error) return fail(`Refusing to touch '${name}': ${parsed.error}`)
+  const lines = content.split('\n')
+  const fmEnd = lines.indexOf('---', 1)
+  if (fmEnd < 0) return fail(`Refusing to touch '${name}': cannot locate end of frontmatter.`)
+  let keyLine = -1
+  for (let i = 1; i < fmEnd; i++) {
+    if (/^([A-Za-z0-9_-]+):\s/.test(lines[i]) && lines[i].startsWith(DISABLE_KEY + ':')) { keyLine = i; break }
+  }
+  const currentlyDisabled = String((parsed.data || {})[DISABLE_KEY]).toLowerCase() === 'true'
+  if (disable) {
+    if (currentlyDisabled) return ok(`Skill '${name}' is already disabled.`)
+    const line = `${DISABLE_KEY}: true`
+    if (keyLine >= 0) lines[keyLine] = line
+    else lines.splice(fmEnd, 0, line)
+  } else {
+    if (!currentlyDisabled) return ok(`Skill '${name}' is already enabled.`)
+    if (keyLine < 0) return fail(`Skill '${name}' has ${DISABLE_KEY} set via an unexpected form; edit manually.`)
+    lines.splice(keyLine, 1)
+  }
+  const updated = lines.join('\n')
+  const fmErr = validateFrontmatter(updated)
+  if (fmErr) return fail(`Refusing to write broken SKILL.md: ${fmErr}`)
+  await atomicWrite(found.skillMd, updated)
+  return ok(`Skill '${name}' ${disable ? 'disabled' : 'enabled'} (${DISABLE_KEY} ${disable ? 'set' : 'removed'}; leaves the catalog next refresh, fully reversible).`)
 }
 
 // ---------------------------------------------------------------------------
@@ -377,9 +461,9 @@ function defineTool(toolName, description, parameters, execute) {
         { type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) },
       ],
     },
-    async execute(args) {
+    async execute(args, exec) {
       try {
-        return await execute(args)
+        return await execute(args, exec)
       } catch (e) {
         return toolName + ' failed: ' + (e && e.message ? e.message : String(e))
       }
@@ -387,16 +471,17 @@ function defineTool(toolName, description, parameters, execute) {
   }
 }
 
-const TOOL_DESCRIPTION = `Manage your own skills (procedural memory) in ~/.dsh/skills. Skills hot-load immediately — created skills are usable in the same session.
+const TOOL_DESCRIPTION = `Manage your own skills (procedural memory) in $DSH_HOME/skills (scope 'user') or <projectRoot>/.dsh/skills (scope 'project', the git root of the current session). Skills hot-load immediately — created skills are usable in the same session.
 
 Actions:
 - create: write a new SKILL.md (full content: YAML frontmatter + body). Frontmatter requires name + description; keep the description trigger-focused ("Use when <trigger>. <one-line behavior>.") — it is what future sessions route on.
 - patch: targeted find-and-replace in SKILL.md or a supporting file (preferred for fixes; far cheaper than edit).
 - edit: full SKILL.md rewrite (major overhauls only).
 - delete: remove a skill. Only skills carrying the 'created_by: agent' marker can be deleted; pinned skills are refused.
+- disable / enable: toggle 'disable-model-invocation' in frontmatter — hides the skill from the model catalog without deleting (reversible). Prefer disable over delete for seasonal/off-context skills.
 - write_file: add or overwrite a supporting file (references/ templates/ scripts/ assets/).
 - remove_file: remove a supporting file.
-- list: show skills with agent-created/pinned flags.
+- list: show skills in both scopes with agent-created/pinned/disabled flags.
 
 Create when: complex task succeeded (5+ tool calls), errors overcome, user-corrected approach worked, non-trivial workflow discovered, or the user asks you to remember a procedure.
 Update when: instructions stale/wrong, OS-specific failures, or missing steps/pitfalls found during use — patch it immediately.
@@ -406,12 +491,17 @@ Confirm with the user before creating or deleting.`
 const skillManageTool = defineTool('skill_manage', TOOL_DESCRIPTION, {
   action: {
     type: 'string', required: true,
-    enum: ['create', 'patch', 'edit', 'delete', 'write_file', 'remove_file', 'list'],
+    enum: ['create', 'patch', 'edit', 'delete', 'disable', 'enable', 'write_file', 'remove_file', 'list'],
     description: 'The action to perform.',
   },
   name: {
     type: 'string',
     description: "Skill name (lowercase, hyphens/dots/underscores, max 64). Required for all actions except 'list'.",
+  },
+  scope: {
+    type: 'string',
+    enum: SCOPES,
+    description: "Where the skill lives: 'user' (default, $DSH_HOME/skills, all workspaces) or 'project' (<git-root>/.dsh/skills, this workspace only).",
   },
   content: {
     type: 'string',
@@ -428,19 +518,40 @@ const skillManageTool = defineTool('skill_manage', TOOL_DESCRIPTION, {
     type: 'string',
     description: "Content for the file. Required for 'write_file' (max 1 MiB).",
   },
-}, async (args) => {
+}, async (args, exec) => {
   const action = args.action
   const name = args.name
   if (action !== 'list' && !name) return fail("Skill name is required for action '" + action + "'.")
+  const scopeErr = validateScope(args.scope)
+  if (scopeErr) return fail(scopeErr)
+  const scope = args.scope || 'user'
+  // Session cwd drives the project root exactly like the harness's own
+  // skill lookups (exec.agent.session.header.cwd).
+  const sessionCwd = exec?.agent?.session?.header?.cwd
+  if (action === 'list') {
+    const roots = []
+    const userRoot = skillsRoot()
+    roots.push({ root: userRoot, label: 'user' })
+    const proj = await skillsRootFor('project', sessionCwd)
+    if (proj.root && proj.root !== userRoot) roots.push({ root: proj.root, label: 'project' })
+    const rows = []
+    for (const r of roots) rows.push(...await listSkills(r.root, r.label))
+    if (!rows.length) return ok('No skills found in either scope.')
+    return ok(`${rows.length} skill(s):`, { skills: rows })
+  }
+  const resolved = await skillsRootFor(scope, sessionCwd)
+  if (resolved.error) return fail(resolved.error)
+  const root = resolved.root
   switch (action) {
-    case 'create': return createSkill(name, String(args.content || ''))
-    case 'patch': return patchSkill(name, args.old_string, args.new_string, args.file_path, !!args.replace_all)
-    case 'edit': return editSkill(name, String(args.content || ''))
-    case 'delete': return deleteSkill(name)
-    case 'write_file': return writeSkillFile(name, args.file_path, args.file_content)
-    case 'remove_file': return removeSkillFile(name, args.file_path)
-    case 'list': return listSkills()
-    default: return fail(`Unknown action '${action}'. Use: create, patch, edit, delete, write_file, remove_file, list.`)
+    case 'create': return createSkill(name, String(args.content || ''), root)
+    case 'patch': return patchSkill(name, args.old_string, args.new_string, args.file_path, !!args.replace_all, root)
+    case 'edit': return editSkill(name, String(args.content || ''), root)
+    case 'delete': return deleteSkill(name, root)
+    case 'disable': return setSkillDisabled(name, true, root)
+    case 'enable': return setSkillDisabled(name, false, root)
+    case 'write_file': return writeSkillFile(name, args.file_path, args.file_content, root)
+    case 'remove_file': return removeSkillFile(name, args.file_path, root)
+    default: return fail(`Unknown action '${action}'. Use: create, patch, edit, delete, disable, enable, write_file, remove_file, list.`)
   }
 })
 
@@ -466,7 +577,8 @@ export function apply(ctx) {
 
 // Exported for smoke tests without a running host.
 export const _internals = {
-  skillsRoot, parseFrontmatter, validateName, validateFrontmatter,
-  ensureAgentMarker, validateDeleteTarget, validateDeleteOwnership,
-  createSkill, patchSkill, editSkill, deleteSkill, writeSkillFile, removeSkillFile, listSkills,
+  skillsRoot, skillsRootFor, projectRootFrom, parseFrontmatter, validateName,
+  validateFrontmatter, ensureAgentMarker, validateDeleteTarget, validateDeleteOwnership,
+  createSkill, patchSkill, editSkill, deleteSkill, setSkillDisabled,
+  writeSkillFile, removeSkillFile, listSkills,
 }
