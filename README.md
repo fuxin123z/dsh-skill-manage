@@ -9,10 +9,12 @@ Pair with [`dsh-auto-memory`](https://github.com/Aik358/dsh-auto-memory) for dec
 
 ## What it adds
 
-**`skill_manage` tool** — actions: `create` / `patch` / `edit` / `delete` / `disable` / `enable` / `write_file` / `remove_file` / `list`
+**`skill_manage` tool** — actions: `create` / `patch` / `edit` / `delete` / `disable` / `enable` / `pin` / `unpin` / `write_file` / `remove_file` / `list`
 
 - **Two scopes** — `scope: 'user'` (default, `~/.dsh/skills`, all workspaces) or `scope: 'project'` (`<projectRoot>/.dsh/skills`, this workspace only). The project root is resolved exactly like the harness's own skill lookup: walk up from the session cwd to the nearest `.git`, falling back to the cwd itself. `list` shows both scopes in one table.
+- **Both on-disk layouts** — directory skills (`<root>/<name>/SKILL.md`, what `create` writes) and single-file skills (`<root>/<name>.md`), matching the two layouts the `skill-filesystem` watcher actually loads. `list` shows a `layout` flag; single-file skills refuse supporting-file actions.
 - **Disable/enable (reversible)** — toggles `disable-model-invocation` in SKILL.md frontmatter, the same key the harness's skill catalog filters on (`isModelInvocable`). Disabling hides a skill from the model's catalog without touching its content; enabling restores it. Prefer `disable` over `delete` for seasonal or off-context skills.
+- **Pin/unpin (reversible)** — toggles the same `pinned` frontmatter flag the delete guard reads. A pinned skill cannot be deleted by `skill_manage` (patch/edit still allowed); pin skills that must survive cleanups.
 - **Trigger discipline** (English, static system-prompt section, cache-stable): create a skill when a complex task succeeded (5+ tool calls), errors were overcome, a user-corrected approach proved itself, or the user asks to remember a procedure; patch immediately when a skill hits uncovered pitfalls.
 - **Delete guards**:
   - only skills carrying the `created_by: agent` frontmatter marker are deletable — marketplace/user skills are refused
@@ -59,15 +61,16 @@ pnpm install
 ## Develop & test
 
 ```bash
-node test.mjs      # guard-level smoke tests (53 cases, sandboxed DSH_HOME)
-node loadtest.mjs  # host-shape contract + real round-trip against ~/.dsh/skills
+node test.mjs      # guard-level smoke tests (71 cases, sandboxed DSH_HOME)
+node loadtest.mjs  # host-shape contract + real round-trip (set DSH_HOME to sandbox it)
 ```
+
+CI runs both on every push/PR (`.github/workflows/ci.yml`).
 
 ## v0 known limitations
 
-- Flat layout only (`<root>/<name>/SKILL.md`); nested category dirs not listed
-- No YAML multi-line block scalars (`description: |`) — keep values single-line
-- Pin management is manual (edit frontmatter); no usage telemetry
+- Nested category dirs (`<root>/<category>/<name>/SKILL.md`) are not listed or operable — the harness watcher does not load them either (it loads only `<root>/<name>/SKILL.md` and `<root>/<name>.md`)
+- No YAML flow collections in frontmatter (`tags: [a, b]` stays a raw string)
 - Project scope assumes one root per session (the session cwd's git root)
 
 ## License
