@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/dsh-skill-manage.svg)](https://www.npmjs.com/package/dsh-skill-manage)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Awesome DSH Plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that gives the agent **procedural memory**: a `skill_manage` tool for authoring its own skills — create, patch, disable, delete — with layered delete guards. Built on `skill-filesystem`'s hot-reload watcher, so a skill created mid-session is usable in the same session, no restart.
 
