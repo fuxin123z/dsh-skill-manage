@@ -40,6 +40,7 @@ const VALID_NAME_RE = /^[a-z0-9][a-z0-9._-]*$/
 const ALLOWED_SUBDIRS = new Set(['references', 'templates', 'scripts', 'assets'])
 const AGENT_MARKER = 'created_by: agent'
 const DISABLE_KEY = 'disable-model-invocation'
+const PIN_KEY = 'pinned'
 const SCOPES = ['user', 'project']
 
 /** System prompt order: tool-guidance band is 100–199 (see dsh-system-prompt types). */
@@ -115,7 +116,13 @@ function ok(message, extra = {}) {
   return JSON.stringify({ success: true, message, ...extra })
 }
 
-/** Extract and minimally parse YAML frontmatter. Returns { data, body, raw } or an error string. */
+/**
+ * Extract and minimally parse YAML frontmatter. Returns { data, body, raw }
+ * or an error string. Supports plain `key: value` lines plus literal (`|`)
+ * and folded (`>`) block scalars — the two forms that appear in real-world
+ * SKILL.md descriptions. Flow sequences/mappings are left unparsed (kept as
+ * raw strings), matching how the harness's own lenient reader treats them.
+ */
 function parseFrontmatter(content) {
   const text = content.replace(/^\uFEFF/, '')
   if (!text.startsWith('---')) return { error: 'SKILL.md must start with YAML frontmatter (---).' }
@@ -124,12 +131,41 @@ function parseFrontmatter(content) {
   const raw = text.slice(3, end + 3)
   const body = text.slice(end + 3).replace(/^---\s*\n?/, '')
   const data = {}
-  for (const line of raw.split('\n')) {
+  const lines = raw.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
     // `(.*?)\s*$` instead of `(.*)$`: JS `.` never crosses line terminators,
     // so a trailing \r (CRLF files) made `(.*)$` fail on EVERY key line.
     // `\s*` also strips surrounding whitespace; keep quote-stripping.
     const m = line.match(/^([A-Za-z0-9_-]+):\s*(.*?)\s*$/)
-    if (m) data[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
+    if (!m) continue
+    const [, key, value] = m
+    if (value === '|' || value === '|-' || value === '|+' || value === '>' || value === '>-' || value === '>+') {
+      // Block scalar: consume following lines that are more indented (or blank).
+      const block = []
+      let j = i + 1
+      for (; j < lines.length; j++) {
+        const next = lines[j]
+        if (next.trim() === '') { block.push(''); continue }
+        if (/^[ \t]/.test(next)) { block.push(next.replace(/\r$/, '')); continue }
+        break
+      }
+      i = j - 1
+      const stripped = block.map((l) => l.replace(/^[ \t]{1,8}/, ''))
+      let joined
+      if (value.startsWith('|')) joined = stripped.join('\n')
+      else joined = stripped.join(' ') // folded: newlines → spaces
+      joined = joined.replace(/\n{3,}/g, '\n\n') // clip: collapse trailing blank runs
+      if (!value.endsWith('-')) {
+        // chomping keep/clip both terminate with exactly one newline
+        joined = joined.replace(/\s+$/, '\n')
+      } else {
+        joined = joined.replace(/\s+$/, '')
+      }
+      data[key] = joined.trim() === '' ? '' : joined
+      continue
+    }
+    data[key] = value.replace(/^['"]|['"]$/g, '')
   }
   return { data, body, raw }
 }
@@ -168,15 +204,26 @@ function skillPaths(name, root) {
   return { dir, skillMd: path.join(dir, 'SKILL.md') }
 }
 
+/**
+ * Resolve a skill by name under a skills root, in the two layouts the
+ * skill-filesystem watcher actually loads: <root>/<name>/SKILL.md (directory
+ * skill) and <root>/<name>.md (single-file skill). Returns
+ * { dir, skillMd, layout } or an error string.
+ */
 async function findSkill(name, root) {
   const nameErr = validateName(name)
   if (nameErr) return { error: nameErr }
   const { dir, skillMd } = skillPaths(name, root)
   try {
     await readFile(skillMd, 'utf8')
-    return { dir, skillMd, root }
+    return { dir, skillMd, root, layout: 'dir' }
+  } catch { /* fall through to the single-file layout */ }
+  const fileMd = path.join(root, name + '.md')
+  try {
+    await readFile(fileMd, 'utf8')
+    return { dir: null, skillMd: fileMd, root, layout: 'file' }
   } catch {
-    return { error: `Skill '${name}' not found under ${root}.` }
+    return { error: `Skill '${name}' not found under ${root} (looked for ${name}/SKILL.md and ${name}.md).` }
   }
 }
 
@@ -270,6 +317,7 @@ async function patchSkill(name, old_string, new_string, file_path, replace_all, 
   if (found.error) return fail(found.error)
   let target = found.skillMd
   if (file_path && file_path !== 'SKILL.md') {
+    if (found.layout === 'file') return fail(`Skill '${name}' is a single-file skill (${name}.md) with no supporting files.`)
     const r = await resolveSupportingFile(found.dir, file_path)
     if (r.error) return fail(r.error)
     target = r.target
@@ -330,6 +378,14 @@ async function editSkill(name, content, root) {
 async function deleteSkill(name, root) {
   const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
+  if (found.layout === 'file') {
+    // Single-file skill: the guards below check directory containment, which
+    // does not apply — apply the ownership guards to the .md file itself.
+    const owner = await validateDeleteOwnership(name, found.skillMd)
+    if (owner) return fail(owner)
+    await rm(found.skillMd, { force: true })
+    return ok(`Skill '${name}' deleted (${name}.md).`)
+  }
   const unsafe = await validateDeleteTarget(found.dir, root)
   if (unsafe) return fail(unsafe)
   const owner = await validateDeleteOwnership(name, found.skillMd)
@@ -342,6 +398,7 @@ async function deleteSkill(name, root) {
 async function writeSkillFile(name, file_path, file_content, root) {
   const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
+  if (found.layout === 'file') return fail(`Skill '${name}' is a single-file skill (${name}.md) with no supporting files.`)
   const r = await resolveSupportingFile(found.dir, file_path)
   if (r.error) return fail(r.error)
   if (file_content === undefined || file_content === null) return fail('file_content is required for write_file.')
@@ -357,6 +414,7 @@ async function writeSkillFile(name, file_path, file_content, root) {
 async function removeSkillFile(name, file_path, root) {
   const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
+  if (found.layout === 'file') return fail(`Skill '${name}' is a single-file skill (${name}.md) with no supporting files.`)
   const r = await resolveSupportingFile(found.dir, file_path)
   if (r.error) return fail(r.error)
   try { await readFile(r.target, 'utf8') } catch {
@@ -378,35 +436,48 @@ async function listSkills(root, scopeLabel) {
     return [] // missing root = no skills there (project roots often absent)
   }
   const rows = []
+  const seen = new Set()
+  const pushRow = (name, content, layout) => {
+    if (seen.has(name)) return
+    seen.add(name)
+    const parsed = parseFrontmatter(content)
+    const data = parsed.data || {}
+    rows.push({
+      name,
+      scope: scopeLabel,
+      layout,
+      agent_created: content.includes(AGENT_MARKER),
+      pinned: String(data.pinned).toLowerCase() === 'true',
+      disabled: String(data[DISABLE_KEY]).toLowerCase() === 'true',
+      description: (data.description || '').slice(0, 100),
+    })
+  }
   for (const e of entries) {
-    if (!e.isDirectory() || e.name.startsWith('.')) continue
-    // flat layout only in v0: <root>/<name>/SKILL.md
-    const skillMd = path.join(root, e.name, 'SKILL.md')
-    try {
-      const content = await readFile(skillMd, 'utf8')
-      const parsed = parseFrontmatter(content)
-      const data = parsed.data || {}
-      rows.push({
-        name: e.name,
-        scope: scopeLabel,
-        agent_created: content.includes(AGENT_MARKER),
-        pinned: String(data.pinned).toLowerCase() === 'true',
-        disabled: String(data[DISABLE_KEY]).toLowerCase() === 'true',
-        description: (data.description || '').slice(0, 100),
-      })
-    } catch {
-      rows.push({ name: e.name, scope: scopeLabel, note: 'no SKILL.md at top level (nested layout not shown in v0)' })
+    if (e.name.startsWith('.')) continue
+    if (e.isDirectory()) {
+      // directory skill: <root>/<name>/SKILL.md (the layout skill_manage creates)
+      const skillMd = path.join(root, e.name, 'SKILL.md')
+      try {
+        pushRow(e.name, await readFile(skillMd, 'utf8'), 'dir')
+      } catch {
+        rows.push({ name: e.name, scope: scopeLabel, note: 'no SKILL.md inside (not loaded by the watcher either)' })
+      }
+    } else if (e.isFile() && e.name.endsWith('.md')) {
+      // single-file skill: <root>/<name>.md (also loaded by the watcher)
+      try {
+        pushRow(e.name.slice(0, -3), await readFile(path.join(root, e.name), 'utf8'), 'file')
+      } catch { /* unreadable — skip */ }
     }
   }
   return rows
 }
 
 /**
- * Disable/enable a skill by writing/removing `disable-model-invocation` in
- * SKILL.md frontmatter — the official key the skill catalog filters on
- * (frontmatterBoolean accepts true/yes/on). Content is otherwise untouched.
+ * Set or clear a boolean frontmatter flag (disable-model-invocation, pinned)
+ * on a SKILL.md, preserving everything else. The official harness reader
+ * (frontmatterBoolean) accepts true/yes/on — we write plain `true`/absent.
  */
-async function setSkillDisabled(name, disable, root) {
+async function setFrontmatterFlag(name, key, set, root) {
   const found = await findSkill(name, root)
   if (found.error) return fail(found.error)
   let content
@@ -418,24 +489,24 @@ async function setSkillDisabled(name, disable, root) {
   if (fmEnd < 0) return fail(`Refusing to touch '${name}': cannot locate end of frontmatter.`)
   let keyLine = -1
   for (let i = 1; i < fmEnd; i++) {
-    if (/^([A-Za-z0-9_-]+):\s/.test(lines[i]) && lines[i].startsWith(DISABLE_KEY + ':')) { keyLine = i; break }
+    if (/^([A-Za-z0-9_-]+):\s/.test(lines[i]) && lines[i].startsWith(key + ':')) { keyLine = i; break }
   }
-  const currentlyDisabled = String((parsed.data || {})[DISABLE_KEY]).toLowerCase() === 'true'
-  if (disable) {
-    if (currentlyDisabled) return ok(`Skill '${name}' is already disabled.`)
-    const line = `${DISABLE_KEY}: true`
+  const currentlySet = String((parsed.data || {})[key]).toLowerCase() === 'true'
+  if (set) {
+    if (currentlySet) return ok(`Skill '${name}' already has ${key}: true.`)
+    const line = `${key}: true`
     if (keyLine >= 0) lines[keyLine] = line
     else lines.splice(fmEnd, 0, line)
   } else {
-    if (!currentlyDisabled) return ok(`Skill '${name}' is already enabled.`)
-    if (keyLine < 0) return fail(`Skill '${name}' has ${DISABLE_KEY} set via an unexpected form; edit manually.`)
+    if (!currentlySet) return ok(`Skill '${name}' does not have ${key} set.`)
+    if (keyLine < 0) return fail(`Skill '${name}' has ${key} set via an unexpected form; edit manually.`)
     lines.splice(keyLine, 1)
   }
   const updated = lines.join('\n')
   const fmErr = validateFrontmatter(updated)
   if (fmErr) return fail(`Refusing to write broken SKILL.md: ${fmErr}`)
   await atomicWrite(found.skillMd, updated)
-  return ok(`Skill '${name}' ${disable ? 'disabled' : 'enabled'} (${DISABLE_KEY} ${disable ? 'set' : 'removed'}; leaves the catalog next refresh, fully reversible).`)
+  return ok(`Skill '${name}': ${key} ${set ? 'set' : 'removed'}.`)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +550,7 @@ Actions:
 - edit: full SKILL.md rewrite (major overhauls only).
 - delete: remove a skill. Only skills carrying the 'created_by: agent' marker can be deleted; pinned skills are refused.
 - disable / enable: toggle 'disable-model-invocation' in frontmatter — hides the skill from the model catalog without deleting (reversible). Prefer disable over delete for seasonal/off-context skills.
+- pin / unpin: toggle the 'pinned' frontmatter flag — a pinned skill cannot be deleted by skill_manage (patches still allowed). Pin skills that must survive cleanups.
 - write_file: add or overwrite a supporting file (references/ templates/ scripts/ assets/).
 - remove_file: remove a supporting file.
 - list: show skills in both scopes with agent-created/pinned/disabled flags.
@@ -491,7 +563,7 @@ Confirm with the user before creating or deleting.`
 const skillManageTool = defineTool('skill_manage', TOOL_DESCRIPTION, {
   action: {
     type: 'string', required: true,
-    enum: ['create', 'patch', 'edit', 'delete', 'disable', 'enable', 'write_file', 'remove_file', 'list'],
+    enum: ['create', 'patch', 'edit', 'delete', 'disable', 'enable', 'pin', 'unpin', 'write_file', 'remove_file', 'list'],
     description: 'The action to perform.',
   },
   name: {
@@ -547,11 +619,13 @@ const skillManageTool = defineTool('skill_manage', TOOL_DESCRIPTION, {
     case 'patch': return patchSkill(name, args.old_string, args.new_string, args.file_path, !!args.replace_all, root)
     case 'edit': return editSkill(name, String(args.content || ''), root)
     case 'delete': return deleteSkill(name, root)
-    case 'disable': return setSkillDisabled(name, true, root)
-    case 'enable': return setSkillDisabled(name, false, root)
+    case 'disable': return setFrontmatterFlag(name, DISABLE_KEY, true, root)
+    case 'enable': return setFrontmatterFlag(name, DISABLE_KEY, false, root)
+    case 'pin': return setFrontmatterFlag(name, PIN_KEY, true, root)
+    case 'unpin': return setFrontmatterFlag(name, PIN_KEY, false, root)
     case 'write_file': return writeSkillFile(name, args.file_path, args.file_content, root)
     case 'remove_file': return removeSkillFile(name, args.file_path, root)
-    default: return fail(`Unknown action '${action}'. Use: create, patch, edit, delete, disable, enable, write_file, remove_file, list.`)
+    default: return fail(`Unknown action '${action}'. Use: create, patch, edit, delete, disable, enable, pin, unpin, write_file, remove_file, list.`)
   }
 })
 
@@ -579,6 +653,6 @@ export function apply(ctx) {
 export const _internals = {
   skillsRoot, skillsRootFor, projectRootFrom, parseFrontmatter, validateName,
   validateFrontmatter, ensureAgentMarker, validateDeleteTarget, validateDeleteOwnership,
-  createSkill, patchSkill, editSkill, deleteSkill, setSkillDisabled,
+  createSkill, patchSkill, editSkill, deleteSkill, setFrontmatterFlag,
   writeSkillFile, removeSkillFile, listSkills,
 }
