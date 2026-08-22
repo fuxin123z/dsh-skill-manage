@@ -1,7 +1,7 @@
 {
   "name": "dsh-skill-manage",
   "description": "DSH skill_manage: agent-managed procedural memory. Create/patch/edit/disable/delete skills in ~/.dsh/skills (user scope) or <projectRoot>/.dsh/skills (project scope), with validation, delete guards (agent-created marker, pin, path confinement), disable/enable via disable-model-invocation, and an English trigger-discipline system prompt section. Built on top of skill-filesystem's hot-reload watcher.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "main": "index.js",
   "repository": {

@@ -53,3 +53,4 @@ service-account*.json
 *.bak
 *.orig
 *.rej
+.marketplace-entry.yml

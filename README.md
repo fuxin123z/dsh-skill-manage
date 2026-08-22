@@ -61,7 +61,7 @@ pnpm install
 ## Develop & test
 
 ```bash
-node test.mjs      # guard-level smoke tests (71 cases, sandboxed DSH_HOME)
+node test.mjs      # guard-level smoke tests (73 cases, sandboxed DSH_HOME)
 node loadtest.mjs  # host-shape contract + real round-trip (set DSH_HOME to sandbox it)
 ```
 

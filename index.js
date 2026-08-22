@@ -308,6 +308,11 @@ async function createSkill(name, content, root) {
   }
   const { dir, skillMd } = skillPaths(name, root)
   try { await readFile(skillMd, 'utf8'); return fail(`Skill '${name}' already exists at ${skillMd}. Use patch or edit.`) } catch { /* not found — good */ }
+  // Also probe the single-file layout: creating <name>/SKILL.md while
+  // <name>.md exists would leave two loadable candidates for one skill
+  // (registry first-wins, the loser becomes an orphan on disk).
+  const fileMd = path.join(root, name + '.md')
+  try { await readFile(fileMd, 'utf8'); return fail(`Skill '${name}' already exists as a single-file skill at ${fileMd}. Use patch or edit.`) } catch { /* not found — good */ }
   await atomicWrite(skillMd, ensureAgentMarker(content))
   return ok(`Skill '${name}' created at ${skillMd}. It is hot-loaded and already usable this session.`, { path: skillMd })
 }
